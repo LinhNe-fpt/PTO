@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Screenshots / debug images
+*.png
+
+# Log files
+*.log
+run.log
+
+# Sensitive / runtime data
+accounts.json
+accounts.txt
+rakuten_accounts.json
+registered_accounts.json
+
+# Session cookies (nhay cam)
+sessions/
+
+# Dump / inspection output
+*.txt
+!README.txt
+
+# Playwright browsers (large)
+.playwright/

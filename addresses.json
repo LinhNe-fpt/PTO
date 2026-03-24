@@ -1,0 +1,107 @@
+[
+  {
+    "postal_code": "1060032",
+    "prefecture": "東京都",
+    "city": "港区六本木",
+    "street": "６−１０−１",
+    "building": ""
+  },
+  {
+    "postal_code": "1600022",
+    "prefecture": "東京都",
+    "city": "新宿区新宿",
+    "street": "３−１−１３",
+    "building": "新宿ビル２０２"
+  },
+  {
+    "postal_code": "1500001",
+    "prefecture": "東京都",
+    "city": "渋谷区神宮前",
+    "street": "１−１４−１０",
+    "building": ""
+  },
+  {
+    "postal_code": "2220033",
+    "prefecture": "神奈川県",
+    "city": "横浜市港北区新横浜",
+    "street": "２−１５−１０",
+    "building": "横浜ビル３０１"
+  },
+  {
+    "postal_code": "2310023",
+    "prefecture": "神奈川県",
+    "city": "横浜市中区山下町",
+    "street": "１−１",
+    "building": ""
+  },
+  {
+    "postal_code": "5300001",
+    "prefecture": "大阪府",
+    "city": "大阪市北区梅田",
+    "street": "１−３−１",
+    "building": "梅田スカイビル"
+  },
+  {
+    "postal_code": "5420086",
+    "prefecture": "大阪府",
+    "city": "大阪市中央区西心斎橋",
+    "street": "２−２−３",
+    "building": ""
+  },
+  {
+    "postal_code": "4600002",
+    "prefecture": "愛知県",
+    "city": "名古屋市中区丸の内",
+    "street": "２−１−１",
+    "building": "丸の内ビル"
+  },
+  {
+    "postal_code": "6008216",
+    "prefecture": "京都府",
+    "city": "京都市下京区烏丸通",
+    "street": "七条下ル東塩小路町",
+    "building": ""
+  },
+  {
+    "postal_code": "8100001",
+    "prefecture": "福岡県",
+    "city": "福岡市中央区天神",
+    "street": "１−４−１",
+    "building": "天神ビル"
+  },
+  {
+    "postal_code": "0600001",
+    "prefecture": "北海道",
+    "city": "札幌市中央区北一条西",
+    "street": "２−１",
+    "building": ""
+  },
+  {
+    "postal_code": "9800021",
+    "prefecture": "宮城県",
+    "city": "仙台市青葉区中央",
+    "street": "１−１−１",
+    "building": "仙台トラストタワー"
+  },
+  {
+    "postal_code": "3300055",
+    "prefecture": "埼玉県",
+    "city": "さいたま市浦和区東高砂町",
+    "street": "１１−１",
+    "building": ""
+  },
+  {
+    "postal_code": "2600045",
+    "prefecture": "千葉県",
+    "city": "千葉市中央区弁天",
+    "street": "１−１−１",
+    "building": "千葉センシティタワー"
+  },
+  {
+    "postal_code": "7300011",
+    "prefecture": "広島県",
+    "city": "広島市中区基町",
+    "street": "６−７８",
+    "building": ""
+  }
+]
