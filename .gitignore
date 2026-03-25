@@ -16,6 +16,9 @@ accounts.json
 accounts.txt
 rakuten_accounts.json
 registered_accounts.json
+captcha_config.json
+email_pool.json
+rakuten_reg_accounts.json
 
 # Session cookies (nhay cam)
 sessions/

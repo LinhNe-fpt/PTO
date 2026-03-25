@@ -22,8 +22,14 @@ from datetime import datetime
 
 log = logging.getLogger(__name__)
 
-RAKUTEN_TOP   = 'https://www.rakuten.co.jp/'
-RAKUTEN_LOGIN = 'https://www.rakuten.co.jp/myrakuten/login/'
+# Trang chu chinh thuc: https://www.rakuten.co.jp/ (Rakuten Ichiba)
+RAKUTEN_TOP = 'https://www.rakuten.co.jp/'
+# SSO moi (2025+): /myrakuten/login/ thuong tra trang loi + redirect — dung authorize
+RAKUTEN_LOGIN = (
+    'https://login.account.rakuten.com/sso/authorize?'
+    'client_id=rakuten_ichiba_top_web&service_id=s245&response_type=code&'
+    'scope=openid&redirect_uri=https%3A%2F%2Fwww.rakuten.co.jp%2F'
+)
 RAKUTEN_SEARCH = 'https://search.rakuten.co.jp/search/mall/{keyword}/'
 CART_URL      = 'https://basket.rakuten.co.jp/'
 
@@ -71,27 +77,43 @@ def task_login(page, context, account):
         raise Exception('Chua co tai khoan Rakuten (rakuten_id / rakuten_password)')
 
     log.info(f'[1] Dang nhap Rakuten: {rakuten_id}')
-    page.goto(RAKUTEN_LOGIN, wait_until='domcontentloaded', timeout=30000)
-    page.wait_for_timeout(1500)
+    page.goto(RAKUTEN_LOGIN, wait_until='domcontentloaded', timeout=45000)
+    page.wait_for_timeout(2000)
 
-    # Dien ID
-    for sel in ['#loginInner_u', 'input[name="u"]', 'input[type="email"]']:
+    # Dien ID / email (SSO login.account.rakuten.com + form cu)
+    user_sels = [
+        '#loginInner_u', 'input[name="u"]',
+        'input[type="email"]', 'input[name="username"]', 'input[name="userId"]',
+        '#user_id', 'input[autocomplete="username"]', 'input[name="email"]',
+    ]
+    for sel in user_sels:
         if page.query_selector(sel):
             _js_fill(page, sel, rakuten_id)
             break
 
     # Dien mat khau
-    for sel in ['#loginInner_p', 'input[name="p"]', 'input[type="password"]']:
+    pwd_sels = [
+        '#loginInner_p', 'input[name="p"]', 'input[type="password"]',
+        'input[autocomplete="current-password"]', 'input[name="password"]',
+    ]
+    for sel in pwd_sels:
         if page.query_selector(sel):
             _js_fill(page, sel, rakuten_pwd)
             break
 
     # Click dang nhap
-    for sel in ['#loginInner_submit', 'input[type="submit"]', 'button[type="submit"]']:
+    clicked = False
+    for sel in [
+        '#loginInner_submit', 'button[type="submit"]', 'input[type="submit"]',
+        'button:has-text("ログイン")', 'button:has-text("次へ")',
+    ]:
         el = page.query_selector(sel)
-        if el:
+        if el and el.is_visible():
             el.click()
+            clicked = True
             break
+    if not clicked:
+        page.keyboard.press('Enter')
 
     page.wait_for_load_state('domcontentloaded', timeout=20000)
     page.wait_for_timeout(2000)

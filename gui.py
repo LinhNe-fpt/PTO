@@ -10,11 +10,13 @@ import threading, queue, json, os, logging
 from datetime import datetime
 
 from storage import save_account
-from data_gen import generate_pto_password
+from data_gen import generate_pto_password, gen_matrix_password
 
 ACCOUNTS_FILE         = 'accounts.json'
 ADDRESSES_FILE        = 'addresses.json'
 RAKUTEN_ACCOUNTS_FILE = 'rakuten_accounts.json'
+RAKUTEN_REG_FILE      = 'rakuten_reg_accounts.json'
+EMAIL_POOL_FILE       = 'email_pool.json'
 PASSWORD              = 'SecurePass123!'
 
 # Queues bot <-> GUI (chi dung khi khong co URL san, fallback)
@@ -32,6 +34,15 @@ ALL_PREFECTURES = [
     '徳島県','香川県','愛媛県','高知県','福岡県','佐賀県','長崎県',
     '熊本県','大分県','宮崎県','鹿児島県','沖縄県',
 ]
+
+STATUS_COLORS_REG = {
+    'pending':     '#888888',
+    'done':        '#27ae60',  # xanh la - da dang ky, chua verify
+    'verified':    '#1abc9c',  # xanh ngoc - da dang ky VA login OK (khong test lai)
+    'failed':      '#e74c3c',
+    'running':     '#3498db',
+    'login_fail':  '#e67e22',  # cam - da dang ky nhung login that bai
+}
 
 STATUS_COLORS = {
     'Cho':          '#888888',
@@ -946,6 +957,508 @@ class RakutenTab(tk.Frame):
         self._save()
 
 
+# ── Dialog: Them/Sua Email trong pool ────────────────────────────────────────
+class EmailPoolDialog(tk.Toplevel):
+    def __init__(self, parent, entry=None):
+        super().__init__(parent)
+        self.title('Them Email' if entry is None else 'Sua Email')
+        self.resizable(False, False)
+        self.result = None
+
+        tk.Label(self, text='Gmail:', font=('', 9)).grid(
+            row=0, column=0, padx=10, pady=8, sticky='e')
+        self._email = tk.StringVar(value=entry.get('email', '') if entry else '')
+        tk.Entry(self, textvariable=self._email, width=36,
+                 font=('Consolas', 9)).grid(row=0, column=1, padx=(2, 10), pady=8)
+
+        tk.Label(self, text='App Password:', font=('', 9)).grid(
+            row=1, column=0, padx=10, pady=8, sticky='e')
+        self._pass = tk.StringVar(value=entry.get('app_pass', '') if entry else '')
+        self._pass_entry = tk.Entry(self, textvariable=self._pass, width=36,
+                                    show='*', font=('Consolas', 9))
+        self._pass_entry.grid(row=1, column=1, padx=(2, 10), pady=8)
+
+        tk.Label(self, text='Prefix alias (tuy chon):', font=('', 9)).grid(
+            row=2, column=0, padx=10, pady=8, sticky='e')
+        self._prefix = tk.StringVar(value=entry.get('prefix', 'raku') if entry else 'raku')
+        tk.Entry(self, textvariable=self._prefix, width=14,
+                 font=('Consolas', 9)).grid(row=2, column=1, padx=(2, 10),
+                                            pady=8, sticky='w')
+        tk.Label(self, text='user+PREFIX001@gmail.com',
+                 fg='gray', font=('', 7)).grid(row=2, column=1, sticky='e', padx=10)
+
+        show_btn = tk.Button(self, text='Hien/An password',
+                             command=self._toggle)
+        show_btn.grid(row=3, column=1, sticky='w', padx=2, pady=(0, 4))
+
+        tk.Label(self, text='Luu y: Bat App Password trong Google Account truoc.',
+                 fg='#c0392b', font=('', 7)).grid(
+            row=4, column=0, columnspan=2, padx=10, pady=(0, 6), sticky='w')
+
+        bf = tk.Frame(self)
+        bf.grid(row=5, column=0, columnspan=2, pady=8)
+        tk.Button(bf, text='Luu', width=10, bg='#27ae60', fg='white',
+                  command=self._save).pack(side='left', padx=4)
+        tk.Button(bf, text='Huy', width=10, command=self.destroy).pack(side='left', padx=4)
+        self.grab_set()
+        self.wait_window()
+
+    def _toggle(self):
+        self._pass_entry.config(
+            show='' if self._pass_entry.cget('show') == '*' else '*')
+
+    def _save(self):
+        e = self._email.get().strip()
+        p = self._pass.get().strip()
+        x = self._prefix.get().strip() or 'raku'
+        if not e or '@' not in e:
+            messagebox.showwarning('', 'Gmail khong hop le!', parent=self); return
+        if not p:
+            messagebox.showwarning('', 'App Password khong duoc de trong!', parent=self); return
+        self.result = {'email': e, 'app_pass': p, 'prefix': x}
+        self.destroy()
+
+
+# ── Tab: Rakuten Dang ky ──────────────────────────────────────────────────────
+class RakutenRegTab(tk.Frame):
+    COLS = ('#', 'Email', 'Ho Ten', 'Password', 'Trang thai', 'Ghi chu')
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app      = app
+        self._accounts: list[dict] = []
+        self._pool:     list[dict] = []   # [{email, app_pass, prefix}, ...]
+        self._build()
+        self._load()
+        self._load_pool()
+
+    # ── Build UI ───────────────────────────────────────────────────────────────
+    def _build(self):
+        # ── Toolbar ────────────────────────────────────────────────────────
+        tb = tk.Frame(self, bd=1, relief='raised')
+        tb.pack(fill='x')
+        tk.Button(tb, text='+ Tao account',
+                  command=self._gen_accounts).pack(side='left', padx=2, pady=3)
+        tk.Button(tb, text='Xoa chon',
+                  command=self._delete).pack(side='left', padx=2, pady=3)
+        tk.Button(tb, text='Xoa done',
+                  command=self._delete_done).pack(side='left', padx=2, pady=3)
+        tk.Button(tb, text='Reset that bai',
+                  command=self._reset_failed).pack(side='left', padx=6, pady=3)
+        ttk.Separator(tb, orient='vertical').pack(side='left', fill='y', padx=6)
+        self.run_btn = tk.Button(tb, text='▶  DANG KY',
+                                 bg='#8e44ad', fg='white', font=('', 10, 'bold'),
+                                 command=self.app.start_rakuten_reg_bot)
+        self.run_btn.pack(side='left', padx=4, pady=3)
+        self.verify_btn = tk.Button(tb, text='✓  VERIFY LOGIN',
+                                    bg='#27ae60', fg='white', font=('', 10, 'bold'),
+                                    command=self.app.start_rakuten_verify_bot)
+        self.verify_btn.pack(side='left', padx=2, pady=3)
+        self.stop_btn = tk.Button(tb, text='■  DUNG',
+                                  bg='#e74c3c', fg='white', font=('', 10, 'bold'),
+                                  command=self.app.stop_rakuten_reg_bot, state='disabled')
+        self.stop_btn.pack(side='left', padx=2, pady=3)
+        ttk.Separator(tb, orient='vertical').pack(side='left', fill='y', padx=6)
+        tk.Label(tb, text='Song song:').pack(side='left', padx=(0, 2))
+        self._max_concurrent = tk.IntVar(value=1)
+        ttk.Spinbox(tb, from_=1, to=10, textvariable=self._max_concurrent,
+                    width=3, font=('Consolas', 9)).pack(side='left', padx=(0, 4))
+        self.status_lbl = tk.Label(tb, text='San sang', fg='gray')
+        self.status_lbl.pack(side='right', padx=10)
+        self.progress_lbl = tk.Label(tb, text='', fg='#8e44ad', font=('', 8, 'bold'))
+        self.progress_lbl.pack(side='right', padx=6)
+
+        # ── Body: Pool (trai) + Config (giua) + Bang TK (phai) ────────────
+        body = tk.Frame(self)
+        body.pack(fill='both', expand=True)
+
+        # ── LEFT: Email Pool ────────────────────────────────────────────────
+        pool_frame = tk.LabelFrame(body, text='  Email Pool  ',
+                                   font=('', 9, 'bold'), fg='#2980b9')
+        pool_frame.pack(side='left', fill='y', padx=(4, 0), pady=4, ipadx=2, ipady=2)
+
+        pool_tb = tk.Frame(pool_frame)
+        pool_tb.pack(fill='x')
+        tk.Button(pool_tb, text='+ Them', font=('', 8),
+                  command=self._pool_add).pack(side='left', padx=2, pady=2)
+        tk.Button(pool_tb, text='Sua', font=('', 8),
+                  command=self._pool_edit).pack(side='left', padx=2, pady=2)
+        tk.Button(pool_tb, text='Xoa', font=('', 8),
+                  command=self._pool_delete).pack(side='left', padx=2, pady=2)
+
+        pool_cols = ('Gmail', 'Prefix')
+        self.pool_tree = ttk.Treeview(pool_frame, columns=pool_cols,
+                                      show='headings', height=8, selectmode='browse')
+        self.pool_tree.heading('Gmail',  text='Gmail')
+        self.pool_tree.heading('Prefix', text='Prefix')
+        self.pool_tree.column('Gmail',  width=190)
+        self.pool_tree.column('Prefix', width=55, stretch=False)
+        pool_vsb = ttk.Scrollbar(pool_frame, orient='vertical',
+                                  command=self.pool_tree.yview)
+        self.pool_tree.configure(yscrollcommand=pool_vsb.set)
+        self.pool_tree.pack(side='left', fill='both', expand=True, padx=(2, 0), pady=2)
+        pool_vsb.pack(side='left', fill='y', pady=2)
+
+        pool_hint = tk.Label(pool_frame,
+            text='OTP gui ve alias:\nuser+PREFIX001@gmail.com\n'
+                 'Moi email duoc phan bo deu\nkhi tao account.',
+            justify='left', fg='gray', font=('', 7))
+        pool_hint.pack(anchor='w', padx=6, pady=(2, 4))
+
+        # ── MIDDLE: Cau hinh sinh account ──────────────────────────────────
+        mid = tk.LabelFrame(body, text='  Cau hinh sinh account  ',
+                            font=('', 9, 'bold'))
+        mid.pack(side='left', fill='y', padx=6, pady=4, ipadx=6, ipady=4)
+
+        def _row(lbl, var, r, w=16, show=''):
+            tk.Label(mid, text=lbl, anchor='e').grid(
+                row=r, column=0, sticky='e', padx=(8, 2), pady=5)
+            tk.Entry(mid, textvariable=var, width=w, show=show,
+                     font=('Consolas', 9)).grid(
+                row=r, column=1, padx=(0, 8), pady=5, sticky='w')
+
+        tk.Label(mid, text='So luong tao:', anchor='e').grid(
+            row=0, column=0, sticky='e', padx=(8, 2), pady=5)
+        self._gen_count = tk.IntVar(value=10)
+        ttk.Spinbox(mid, from_=1, to=500, textvariable=self._gen_count,
+                    width=6, font=('Consolas', 9)).grid(
+            row=0, column=1, padx=(0, 8), pady=5, sticky='w')
+
+        # Seed Key cho ma tran mat khau
+        tk.Label(mid, text='Seed Key (ma tran):', anchor='e').grid(
+            row=1, column=0, sticky='e', padx=(8, 2), pady=5)
+        self._seed_key = tk.StringVar(value='PTO2026')
+        seed_entry = tk.Entry(mid, textvariable=self._seed_key, width=16,
+                              font=('Consolas', 9))
+        seed_entry.grid(row=1, column=1, padx=(0, 8), pady=5, sticky='w')
+
+        tk.Label(mid, text='(doi seed → bo mat khau\nhoan toan khac nhau)',
+                 fg='gray', font=('', 7), justify='left').grid(
+            row=2, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6))
+
+        # Preview mat khau ma tran
+        tk.Label(mid, text='Preview mat khau:', font=('', 8, 'bold')).grid(
+            row=3, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0))
+        self._preview_text = tk.Text(mid, height=6, width=22, state='disabled',
+                                     font=('Consolas', 8), bg='#f8f8f8')
+        self._preview_text.grid(row=4, column=0, columnspan=2,
+                                padx=8, pady=(0, 4), sticky='w')
+        tk.Button(mid, text='Xem truoc mat khau',
+                  font=('', 8), command=self._preview_pwd).grid(
+            row=5, column=0, columnspan=2, padx=8, pady=2)
+
+        ttk.Separator(mid, orient='horizontal').grid(
+            row=6, column=0, columnspan=2, sticky='ew', pady=6)
+
+        # ── Vision AI CAPTCHA config ─────────────────────────────────────────
+        tk.Label(mid, text='Vision AI (CAPTCHA):', font=('', 8, 'bold'),
+                 fg='#8e44ad').grid(row=7, column=0, columnspan=2,
+                                    sticky='w', padx=8, pady=(4, 0))
+
+        tk.Label(mid, text='Provider:', anchor='e').grid(
+            row=8, column=0, sticky='e', padx=(8, 2), pady=2)
+        self._vision_provider = tk.StringVar(value='gemini')
+        ttk.Combobox(mid, textvariable=self._vision_provider,
+                     values=['gemini', 'openai'], state='readonly',
+                     width=8).grid(row=8, column=1, sticky='w', padx=(0, 8), pady=2)
+
+        tk.Label(mid, text='API Key:', anchor='e').grid(
+            row=9, column=0, sticky='e', padx=(8, 2), pady=2)
+        self._vision_api_key = tk.StringVar()
+        tk.Entry(mid, textvariable=self._vision_api_key, width=16,
+                 show='*', font=('Consolas', 8)).grid(
+            row=9, column=1, sticky='w', padx=(0, 8), pady=2)
+
+        tk.Button(mid, text='Luu API Key',
+                  font=('', 8), command=self._save_vision_config).grid(
+            row=10, column=0, columnspan=2, padx=8, pady=(2, 4), sticky='ew')
+
+        # Load key hien tai
+        self._load_vision_config()
+
+        ttk.Separator(mid, orient='horizontal').grid(
+            row=11, column=0, columnspan=2, sticky='ew', pady=6)
+
+        tk.Button(mid, text='⚡  TAO ACCOUNT',
+                  bg='#8e44ad', fg='white', font=('', 10, 'bold'),
+                  command=self._gen_accounts).grid(
+            row=12, column=0, columnspan=2, padx=8, pady=4, sticky='ew')
+
+        tk.Label(mid, text='(Luu vao rakuten_reg_accounts.json)',
+                 fg='gray', font=('', 7)).grid(
+            row=8, column=0, columnspan=2, padx=8, pady=(0, 4))
+
+        # Seed key thay doi -> cap nhat preview
+        self._seed_key.trace_add('write', lambda *_: self.after(200, self._preview_pwd))
+
+        # ── RIGHT: Bang tai khoan ───────────────────────────────────────────
+        right = tk.Frame(body)
+        right.pack(side='left', fill='both', expand=True, pady=4, padx=(0, 4))
+
+        tk.Label(right, text='Danh sach account dang ky',
+                 font=('', 9, 'bold')).pack(anchor='w', padx=6, pady=(4, 0))
+        tf = tk.Frame(right)
+        tf.pack(fill='both', expand=True, padx=4, pady=4)
+        self.tree = ttk.Treeview(tf, columns=self.COLS,
+                                 show='headings', selectmode='browse')
+        for col, w, stretch in [
+            ('#',          32,  False),
+            ('Email',      240, False),
+            ('Ho Ten',     120, False),
+            ('Password',   115, False),
+            ('Trang thai', 75,  False),
+            ('Ghi chu',    240, True),
+        ]:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=w, stretch=stretch)
+        vsb = ttk.Scrollbar(tf, orient='vertical',   command=self.tree.yview)
+        hsb = ttk.Scrollbar(tf, orient='horizontal', command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+        tf.rowconfigure(0, weight=1)
+        tf.columnconfigure(0, weight=1)
+        for tag, color in STATUS_COLORS_REG.items():
+            self.tree.tag_configure(tag, foreground=color)
+
+    # ── Email Pool CRUD ────────────────────────────────────────────────────────
+    def _pool_refresh(self):
+        for r in self.pool_tree.get_children():
+            self.pool_tree.delete(r)
+        for p in self._pool:
+            self.pool_tree.insert('', 'end', values=(p['email'], p.get('prefix', 'raku')))
+
+    def _pool_sel(self):
+        sel = self.pool_tree.selection()
+        return self.pool_tree.index(sel[0]) if sel else None
+
+    def _pool_add(self):
+        dlg = EmailPoolDialog(self)
+        if dlg.result:
+            self._pool.append(dlg.result)
+            self._save_pool(); self._pool_refresh()
+
+    def _pool_edit(self):
+        idx = self._pool_sel()
+        if idx is None: return
+        dlg = EmailPoolDialog(self, self._pool[idx])
+        if dlg.result:
+            self._pool[idx] = dlg.result
+            self._save_pool(); self._pool_refresh()
+
+    def _pool_delete(self):
+        idx = self._pool_sel()
+        if idx is None: return
+        e = self._pool[idx]['email']
+        if messagebox.askyesno('Xoa', f'Xoa {e} khoi pool?'):
+            self._pool.pop(idx); self._save_pool(); self._pool_refresh()
+
+    # ── Preview mat khau ───────────────────────────────────────────────────────
+    def _preview_pwd(self):
+        seed = self._seed_key.get().strip() or 'PTO2026'
+        lines = [f'#{n:03d}: {gen_matrix_password(n, seed)}' for n in range(1, 7)]
+        self._preview_text.config(state='normal')
+        self._preview_text.delete('1.0', 'end')
+        self._preview_text.insert('end', '\n'.join(lines))
+        self._preview_text.config(state='disabled')
+
+    def _load_vision_config(self):
+        """Load API key hien tai tu captcha_config.json."""
+        try:
+            p = Path('captcha_config.json')
+            if p.exists():
+                cfg = json.loads(p.read_text(encoding='utf-8'))
+                self._vision_provider.set(cfg.get('provider', 'gemini'))
+                key = cfg.get('gemini_api_key', '') or cfg.get('openai_api_key', '')
+                self._vision_api_key.set(key)
+        except Exception:
+            pass
+
+    def _save_vision_config(self):
+        """Luu API key vao captcha_config.json."""
+        provider = self._vision_provider.get()
+        key      = self._vision_api_key.get().strip()
+        if not key:
+            messagebox.showwarning('', 'Chua nhap API Key!'); return
+        cfg = {
+            'provider': provider,
+            'gemini_api_key':  key if provider == 'gemini'  else '',
+            'openai_api_key':  key if provider == 'openai'  else '',
+            'openai_model':    'gpt-4o-mini',
+        }
+        Path('captcha_config.json').write_text(
+            json.dumps(cfg, indent=2, ensure_ascii=False), encoding='utf-8'
+        )
+        messagebox.showinfo('', f'Da luu API Key ({provider})!\n\nBot se tu dong giai CAPTCHA bang Vision AI.')
+
+    # ── Refresh bang account ───────────────────────────────────────────────────
+    def _refresh(self):
+        for r in self.tree.get_children():
+            self.tree.delete(r)
+        for acc in self._accounts:
+            name = f"{acc.get('last_kanji','')} {acc.get('first_kanji','')}"
+            s    = acc.get('status', 'pending')
+            self.tree.insert('', 'end', values=(
+                acc['n'], acc['email'], name,
+                acc.get('password', ''), s, acc.get('note', '')
+            ), tags=(s,))
+        pending    = sum(1 for a in self._accounts if a.get('status') == 'pending')
+        done       = sum(1 for a in self._accounts if a.get('status') == 'done')
+        verified   = sum(1 for a in self._accounts if a.get('status') == 'verified')
+        failed     = sum(1 for a in self._accounts if a.get('status') == 'failed')
+        login_fail = sum(1 for a in self._accounts if a.get('status') == 'login_fail')
+        self.progress_lbl.config(
+            text=f'Tong: {len(self._accounts)}  |  '
+                 f'Pending:{pending}  Done:{done}  Verified:{verified}  '
+                 f'Failed:{failed}  LoginFail:{login_fail}')
+
+    def set_status(self, n: int, status: str, note: str = ''):
+        for acc in self._accounts:
+            if acc['n'] == n:
+                acc['status'] = status
+                if note: acc['note'] = note
+        self._save()
+        self.after(0, self._refresh)
+
+    def _sel_idx(self):
+        sel = self.tree.selection()
+        return self.tree.index(sel[0]) if sel else None
+
+    # ── Generate accounts ──────────────────────────────────────────────────────
+    def _gen_accounts(self):
+        import re as _re
+        from data_gen import generate_japanese_profile
+
+        pool  = self._pool
+        count = self._gen_count.get()
+        seed  = self._seed_key.get().strip() or 'PTO2026'
+
+        if not pool:
+            messagebox.showwarning(
+                '', 'Chua co Email nao trong Pool!\n'
+                    'Bam "+ Them" trong Email Pool de them Gmail + App Password.')
+            return
+
+        # Tim so thu tu (n) lon nhat hien co de tiep tuc
+        existing_nums = set()
+        for acc in self._accounts:
+            existing_nums.add(acc.get('n', 0))
+
+        added  = 0
+        n      = max(existing_nums, default=0) + 1
+        pool_i = 0   # phan bo xoay vong qua cac email trong pool
+
+        while added < count:
+            while n in existing_nums:
+                n += 1
+
+            # Chon email tu pool theo vong tron
+            ep     = pool[pool_i % len(pool)]
+            prefix = ep.get('prefix', 'raku')
+            local, domain = ep['email'].split('@', 1)
+            alias  = f"{local}+{prefix}{n:03d}@{domain}"
+
+            profile = generate_japanese_profile()
+            pwd     = gen_matrix_password(n, seed)   # ← MA TRAN
+
+            acc = {
+                'n':           n,
+                'email':       alias,
+                'email_pass':  ep['app_pass'],
+                'password':    pwd,
+                'seed':        seed,
+                'last_kanji':  profile['full_name'].split()[0],
+                'first_kanji': profile['full_name'].split()[-1],
+                'last_kana':   profile['full_kana'].split()[0],
+                'first_kana':  profile['full_kana'].split()[-1],
+                'birthday':    (f"{profile['birthday_year']}-"
+                                f"{profile['birthday_month']}-"
+                                f"{profile['birthday_day']}"),
+                'gender':      profile['gender'],
+                'phone':       profile['phone_gen'],
+                'postal_code': profile['postal_code'],
+                'prefecture':  profile['prefecture'],
+                'city':        profile['city'],
+                'street':      profile['street'],
+                'building':    profile.get('building', ''),
+                'status':      'pending',
+                'rakuten_id':  '',
+                'note':        '',
+            }
+            self._accounts.append(acc)
+            existing_nums.add(n)
+            added  += 1
+            pool_i += 1
+            n      += 1
+
+        self._accounts.sort(key=lambda x: x['n'])
+        self._save(); self._refresh()
+        messagebox.showinfo(
+            'Tao account',
+            f'Da tao {added} account (seed: {seed}).\n'
+            f'Tong: {len(self._accounts)} account.')
+
+    def _delete(self):
+        idx = self._sel_idx()
+        if idx is None: return
+        acc = self._accounts[idx]
+        if messagebox.askyesno('Xoa', f'Xoa #{acc["n"]}: {acc["email"]}?'):
+            self._accounts.pop(idx); self._save(); self._refresh()
+
+    def _delete_done(self):
+        before = len(self._accounts)
+        self._accounts = [a for a in self._accounts if a.get('status') != 'done']
+        self._save(); self._refresh()
+        messagebox.showinfo('', f'Da xoa {before - len(self._accounts)} account done.')
+
+    def _reset_failed(self):
+        for acc in self._accounts:
+            if acc.get('status') == 'failed':
+                acc['status'] = 'pending'; acc['note'] = ''
+        self._save(); self._refresh()
+
+    # ── Load / Save ────────────────────────────────────────────────────────────
+    def _load(self):
+        if not os.path.exists(RAKUTEN_REG_FILE): return
+        try:
+            with open(RAKUTEN_REG_FILE, 'r', encoding='utf-8') as f:
+                self._accounts = json.load(f)
+            for acc in self._accounts:
+                acc.setdefault('status', 'pending')
+                acc.setdefault('note', '')
+                acc.setdefault('rakuten_id', '')
+            self._refresh()
+        except Exception:
+            pass
+
+    def _save(self):
+        with open(RAKUTEN_REG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self._accounts, f, ensure_ascii=False, indent=2)
+
+    def _load_pool(self):
+        if not os.path.exists(EMAIL_POOL_FILE): return
+        try:
+            with open(EMAIL_POOL_FILE, 'r', encoding='utf-8') as f:
+                self._pool = json.load(f)
+            self._pool_refresh()
+            self._preview_pwd()
+        except Exception:
+            pass
+
+    def _save_pool(self):
+        with open(EMAIL_POOL_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self._pool, f, ensure_ascii=False, indent=2)
+
+    def get_pending(self) -> list[dict]:
+        """Tra ve cac account chua dang ky (pending hoac failed)."""
+        return [a for a in self._accounts
+                if a.get('status') in ('pending', 'failed')]
+
+    def get_max_concurrent(self) -> int:
+        return max(1, self._max_concurrent.get())
+
+
 # ── App chinh ─────────────────────────────────────────────────────────────────
 class App(tk.Tk):
     def __init__(self):
@@ -960,12 +1473,14 @@ class App(tk.Tk):
     def _build(self):
         nb = ttk.Notebook(self)
         nb.pack(fill='both', expand=True, padx=4, pady=(4, 2))
-        self.acc_tab     = AccountTab(nb, self)
-        self.addr_tab    = AddressTab(nb)
-        self.rakuten_tab = RakutenTab(nb, self)
-        nb.add(self.acc_tab,     text='  PokemonCenter  ')
-        nb.add(self.addr_tab,    text='  Dia chi Nhat Ban  ')
-        nb.add(self.rakuten_tab, text='  Rakuten Orders  ')
+        self.acc_tab        = AccountTab(nb, self)
+        self.addr_tab       = AddressTab(nb)
+        self.rakuten_tab    = RakutenTab(nb, self)
+        self.rakuten_reg_tab = RakutenRegTab(nb, self)
+        nb.add(self.acc_tab,         text='  PokemonCenter  ')
+        nb.add(self.addr_tab,        text='  Dia chi Nhat Ban  ')
+        nb.add(self.rakuten_tab,     text='  Rakuten Orders  ')
+        nb.add(self.rakuten_reg_tab, text='  Rakuten Dang ky  ')
 
         log_frame = tk.LabelFrame(self, text='Log hoat dong')
         log_frame.pack(fill='x', padx=4, pady=(0, 4))
@@ -1594,6 +2109,158 @@ class App(tk.Tk):
         self.rakuten_tab.stop_btn.config(state='disabled')
         self.rakuten_tab.status_lbl.config(text='Hoan thanh', fg='#27ae60')
         self.rakuten_tab.update_snipe_status('')
+
+    # ── Rakuten Dang ky Bot ───────────────────────────────────────────────────
+    def start_rakuten_reg_bot(self):
+        pending = self.rakuten_reg_tab.get_pending()
+        if not pending:
+            messagebox.showinfo('', 'Khong co account nao dang cho dang ky.\n'
+                                    'Bam "+ Tao account" de tao them.'); return
+
+        maxcon = self.rakuten_reg_tab.get_max_concurrent()
+        if not messagebox.askyesno(
+            'Xac nhan',
+            f'Se dang ky {len(pending)} account Rakuten\n'
+            f'(song song toi da {maxcon} browser).\n\nTiep tuc?'
+        ): return
+
+        self._reg_stop_event = threading.Event()
+        self._reg_running    = True
+        self.rakuten_reg_tab.run_btn.config(state='disabled')
+        self.rakuten_reg_tab.verify_btn.config(state='disabled')
+        self.rakuten_reg_tab.stop_btn.config(state='normal')
+        self.rakuten_reg_tab.status_lbl.config(text='Dang dang ky...', fg='#8e44ad')
+        threading.Thread(
+            target=self._rakuten_reg_worker,
+            args=(pending, maxcon, 'register'),
+            daemon=True,
+        ).start()
+
+    def start_rakuten_verify_bot(self):
+        """Verify login cho cac account da dang ky (status='done')."""
+        import json
+        from pathlib import Path
+        data = json.loads(Path('rakuten_reg_accounts.json').read_text(encoding='utf-8')) \
+               if Path('rakuten_reg_accounts.json').exists() else []
+        # "verified" = da xac nhan OK -> khong test lai
+        done_accs = [a for a in data if a.get('status') in ('done', 'login_fail')]
+        if not done_accs:
+            messagebox.showinfo('', 'Khong co account "done"/"login_fail" nao de verify.\n'
+                                    '("verified" = da xac nhan OK, khong can test lai)\n'
+                                    'Hay dang ky truoc.'); return
+
+        maxcon = self.rakuten_reg_tab.get_max_concurrent()
+        if not messagebox.askyesno(
+            'Xac nhan',
+            f'Se kiem tra dang nhap {len(done_accs)} account da dang ky.\n'
+            f'(song song toi da {maxcon} browser).\n\nTiep tuc?'
+        ): return
+
+        self._reg_stop_event = threading.Event()
+        self._reg_running    = True
+        self.rakuten_reg_tab.run_btn.config(state='disabled')
+        self.rakuten_reg_tab.verify_btn.config(state='disabled')
+        self.rakuten_reg_tab.stop_btn.config(state='normal')
+        self.rakuten_reg_tab.status_lbl.config(text='Dang verify login...', fg='#27ae60')
+        threading.Thread(
+            target=self._rakuten_reg_worker,
+            args=(done_accs, maxcon, 'verify'),
+            daemon=True,
+        ).start()
+
+    def stop_rakuten_reg_bot(self):
+        self._reg_running = False
+        if hasattr(self, '_reg_stop_event'):
+            self._reg_stop_event.set()
+        self.rakuten_reg_tab.status_lbl.config(text='Dang dung...', fg='#e74c3c')
+
+    def _rakuten_reg_worker(self, accounts: list[dict], max_concurrent: int, mode: str):
+        """
+        Worker chung cho ca 'register' va 'verify'.
+        mode = 'register' | 'verify'
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from playwright.sync_api import sync_playwright
+        from tasks_rakuten_reg import register_one, verify_login_one
+
+        total         = len(accounts)
+        done_count    = 0
+        success_count = 0
+        lock          = threading.Lock()
+
+        logging.info(f'[{mode.upper()}] Bat dau {total} account (song song: {max_concurrent})')
+
+        def _run_one(acc: dict):
+            nonlocal done_count, success_count
+            n = acc['n']
+
+            if not getattr(self, '_reg_running', False):
+                return
+
+            def _cb(msg):
+                logging.info(msg)
+            def _stopped():
+                return not getattr(self, '_reg_running', False)
+
+            # Hien thi trang thai dang chay
+            if mode == 'register':
+                self.rakuten_reg_tab.set_status(n, 'running', 'Dang dang ky...')
+            else:
+                self.rakuten_reg_tab.set_status(n, 'done', 'Dang verify login...')
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=False)
+                try:
+                    if mode == 'register':
+                        success, note = register_one(acc, browser,
+                                                     status_cb=_cb, stop_check=_stopped)
+                    else:
+                        success, note = verify_login_one(acc, browser,
+                                                         status_cb=_cb, stop_check=_stopped)
+                finally:
+                    try: browser.close()
+                    except Exception: pass
+
+            with lock:
+                done_count += 1
+                if success:
+                    success_count += 1
+                if mode == 'register':
+                    new_status = 'done' if success else 'failed'
+                else:
+                    # Verify: login OK -> "verified" (khong test lai lan sau)
+                    #         login fail -> "login_fail"
+                    new_status = 'verified' if success else 'login_fail'
+                self.rakuten_reg_tab.set_status(n, new_status, note)
+                status_label = 'THANH CONG' if success else 'THAT BAI'
+                logging.info(f'[{mode.upper()} #{n:03d}] {status_label}: {note}')
+                d, s = done_count, success_count
+
+            action_lbl = 'Dang ky' if mode == 'register' else 'Verify'
+            self.rakuten_reg_tab.after(
+                0, self.rakuten_reg_tab.progress_lbl.config,
+                {'text': f'{action_lbl} [{d}/{total}]  OK: {s}  Fail: {d-s}',
+                 'fg': '#27ae60' if mode == 'verify' else '#8e44ad'}
+            )
+
+        with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+            futures = {pool.submit(_run_one, acc): acc for acc in accounts}
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except Exception as e:
+                    logging.error(f'[{mode.upper()}] Loi thread: {e}')
+
+        logging.info(f'[{mode.upper()}] XONG: {success_count}/{total} thanh cong')
+        self.after(0, self._rakuten_reg_done)
+
+    def _rakuten_reg_done(self):
+        self._reg_running = False
+        self.rakuten_reg_tab.run_btn.config(state='normal')
+        self.rakuten_reg_tab.verify_btn.config(state='normal')
+        self.rakuten_reg_tab.stop_btn.config(state='disabled')
+        self.rakuten_reg_tab.status_lbl.config(text='Hoan thanh', fg='#27ae60')
+        self.rakuten_reg_tab._refresh()
 
     # ── Poll ──────────────────────────────────────────────────────────────────
     def _poll(self):
